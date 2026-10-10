@@ -1,8 +1,10 @@
 # Moneta
 
-Moneta is a planned accounting application written entirely in C++. Its backend will be fully C++ based, with a focus on correctness, reliable persistence, and clear interfaces before frontend development.
+Moneta is an accounting application being developed entirely in C++. Its backend will be fully C++ based, with a focus on correctness, reliable persistence, and clear interfaces before frontend development.
 
 Trees will be the primary data structure for organizing expenses and calculating expense totals. Income, accounts, debts, and investments will have separate models; income does not belong in the expense tree.
+
+The first implemented module is the C++20 expense tree. See [the expense tree design](docs/expense-tree.md) for its fields, accounting invariants, API example, and the limits of using a tree for financial queries.
 
 ## Transaction tree
 
@@ -161,4 +163,26 @@ These are suggestions for future consideration, rather than commitments for the 
 
 ## Project status
 
-The project is currently at the requirements stage. No application code, build system, or tests have been added yet.
+The in-memory expense tree, typed identifiers, integer money arithmetic, and inclusive date ranges are implemented. The tree supports groups, transactions, splits, merges, reclassification, corrections, deletion, and subtree totals. Tests cover money preservation, metadata preservation, date filtering, invalid operations, overflow, and deep/wide hierarchies.
+
+Accounts, ledger persistence, income, debts, investments, a CLI, and a frontend remain planned. Tree operations do not update account balances; a future application service must coordinate those changes with the ledger.
+
+## Build and test
+
+With a C++20 compiler and CMake 3.20 or newer:
+
+```sh
+cmake -S . -B build
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
+
+Without CMake, the dependency-free tests can also be built directly:
+
+```sh
+mkdir -p build
+g++ -std=c++20 -Wall -Wextra -Wpedantic -Iinclude \
+    src/core/money.cpp src/expenses/expense_tree.cpp \
+    tests/unit/expense_tree_tests.cpp -o build/expense_tree_tests
+./build/expense_tree_tests
+```
