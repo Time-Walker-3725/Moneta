@@ -20,7 +20,7 @@ struct Expense {
     std::optional<LocationId> location_id;
     std::string merchant;
     std::string note;
-    std::vector<std::string> tags;
+    std::vector<std::string> tags; // Free-form labels; preserved as supplied.
 };
 
 } // namespace moneta

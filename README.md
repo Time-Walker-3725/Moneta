@@ -45,6 +45,7 @@ The target query complexity is **O(1) to O(n)**, where `n` is the number of rele
 ## Planned capabilities
 
 - **Spending reports:** View overall expenses, monthly expenses, and expenses within any selected date range, including totals for individual categories or subtrees.
+- **Tag reports:** Label transactions across categories, then list and total matches such as `#Subscription`, optionally within a selected date range. The in-memory tree supports these queries now.
 - **Location reports:** Track where money is spent and filter location totals by date range.
 - **Accounts and balances:** Manage cash and bank accounts, opening balances, deposits, withdrawals, and transfers; calculate current balances from recorded ledger entries.
 - **Income:** Record incoming money separately from expenses.
@@ -163,7 +164,7 @@ These are suggestions for future consideration, rather than commitments for the 
 
 ## Project status
 
-The in-memory expense tree, typed identifiers, integer money arithmetic, and inclusive date ranges are implemented. The tree supports groups, transactions, splits, merges, reclassification, corrections, deletion, and subtree totals. Tests cover money preservation, metadata preservation, date filtering, invalid operations, overflow, and deep/wide hierarchies.
+The in-memory expense tree, typed identifiers, integer money arithmetic, and inclusive date ranges are implemented. The tree supports groups, transactions, splits, merges, reclassification, corrections, deletion, subtree totals, and transaction lists/totals filtered by tag. Tests cover money preservation, metadata preservation, date/tag filtering, invalid operations, overflow, and deep/wide hierarchies.
 
 Accounts, ledger persistence, income, debts, investments, a CLI, and a frontend remain planned. Tree operations do not update account balances; a future application service must coordinate those changes with the ledger.
 

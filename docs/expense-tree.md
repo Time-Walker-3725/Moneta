@@ -72,6 +72,48 @@ that the referenced records exist. Coordinates and addresses belong in the
 location store. Balances, income, loan principal, investments, and exchange rates
 do not belong on expense nodes.
 
+## Tag filtering
+
+Tags classify a transaction across category boundaries. For example, a streaming
+payment under Entertainment and a gym payment under Health can both carry the
+`Subscription` tag. They remain in their existing tree branches while a tag
+query can list them together and calculate their combined spending.
+
+```cpp
+// Add a label to an existing transaction without changing its accounting data.
+auto expense = *tree.node(transaction_id).expense;
+expense.tags.push_back("#Subscription");
+tree.update_expense(transaction_id, expense);
+
+const auto subscriptions = tree.transactions_by_tag(tree.root_id(), "subscription");
+const auto spent = tree.total_by_tag(tree.root_id(), "#Subscription");
+const auto monthly = tree.total_by_tag(tree.root_id(), "subscription", DateRange{
+    std::chrono::year{2026} / std::chrono::October / 1,
+    std::chrono::year{2026} / std::chrono::October / 31});
+```
+
+Both queries match the complete label, ignoring ASCII letter case, surrounding
+whitespace, and one optional leading `#`. `Subscription`, `#Subscription`, and
+`subscription` therefore match; `subscriptionExtra` does not. Stored labels are
+preserved as supplied. Unicode characters are compared exactly; Unicode case
+folding is not implemented. Blank query labels are rejected.
+
+Queries can start at the root, a group, or a transaction and can combine a tag
+with an inclusive date range. Split items inherit their parent's tags. A query
+starting at an item uses its parent transaction for matching; the list returns
+the transaction's ID, while the total contributes only that item's amount.
+Results follow tree order. No match produces an empty list and a zero total.
+
+A transaction with duplicate matching labels still appears once, and a split
+transaction contributes its recorded total once. Different tag reports can
+overlap: a transaction tagged both `Subscription` and `Work` belongs to both
+reports, so adding those two report totals can count it twice.
+
+Location is separate structured metadata: `location_id` points to a place record.
+A label such as `Subscription` describes a transaction without replacing its
+account, category, merchant, or location. Adding a label does not create a
+recurring payment schedule; recurrence will need its own model.
+
 ## Accounting rules
 
 - Root and group nodes contain groups or transactions. Transactions contain
@@ -119,6 +161,7 @@ the cost of copying text/metadata.
 | Add group or expense | Expected amortized O(1) |
 | Query transaction or item total | Expected O(1) |
 | Query group total, with or without a date range | Expected O(v) |
+| List transactions or total spending by tag | Expected O(v + inspected tag text) |
 | Move group or transaction | Expected O(h + d), plus amortized destination append |
 | Split or replace items | Expected O(new item count + old item count) |
 | Merge items | Expected O(item count) |
@@ -128,6 +171,10 @@ Totals and deletion use iterative traversal, so deeply nested categories do not
 consume the call stack. Traversal can use O(v) or O(s) temporary memory. Date
 queries still scan the subtree's transactions, including those outside the
 range; this is not yet an indexed range-query implementation.
+
+Tag queries also scan the selected subtree and compare the eligible transactions'
+labels. They do not yet use a tag index. They can use O(v) traversal/result space
+plus temporary memory proportional to a normalized label's length.
 
 The first optimization should follow measured usage. Cached all-time subtree
 totals can make those reads O(1), with ancestor updates on edits. Arbitrary date

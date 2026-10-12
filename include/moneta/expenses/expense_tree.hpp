@@ -5,6 +5,7 @@
 
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -56,6 +57,17 @@ public:
     // that item's amount and its transaction's date. Range endpoints are inclusive.
     [[nodiscard]] Money total(NodeId subtree, std::optional<DateRange> range = std::nullopt) const;
 
+    // Match a complete tag, ignoring ASCII case, outer whitespace, and one
+    // optional leading '#'. Querying an item returns its owning transaction ID.
+    // Results follow tree order, and split transactions appear only once.
+    [[nodiscard]] std::vector<NodeId> transactions_by_tag(
+        NodeId subtree, std::string_view tag, std::optional<DateRange> range = std::nullopt) const;
+
+    // Count matched spending once. For an item subtree, use only that item's
+    // amount while matching its parent transaction's tags and date.
+    [[nodiscard]] Money total_by_tag(
+        NodeId subtree, std::string_view tag, std::optional<DateRange> range = std::nullopt) const;
+
 private:
     Currency currency_;
     std::unordered_map<std::uint64_t, ExpenseNode> nodes_;
@@ -69,6 +81,8 @@ private:
     void validate_expense(const Expense& expense) const;
     void validate_amount(const Money& amount) const;
     static void validate_name(const std::string& name);
+    [[nodiscard]] std::vector<NodeId> tagged_nodes(
+        NodeId subtree, std::string_view tag, std::optional<DateRange> range) const;
 };
 
 } // namespace moneta

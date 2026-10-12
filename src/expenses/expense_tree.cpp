@@ -8,6 +8,34 @@
 
 namespace moneta {
 
+namespace {
+
+std::string tag_key(std::string_view tag) {
+    constexpr std::string_view whitespace = " \t\r\n\f\v";
+    auto trim = [&] {
+        const auto first = tag.find_first_not_of(whitespace);
+        if (first == std::string_view::npos) {
+            tag = {};
+        } else {
+            tag = tag.substr(first, tag.find_last_not_of(whitespace) - first + 1);
+        }
+    };
+    trim();
+    if (!tag.empty() && tag.front() == '#') {
+        tag.remove_prefix(1);
+        trim();
+    }
+    std::string key{tag};
+    for (auto& character : key) {
+        if (character >= 'A' && character <= 'Z') {
+            character = static_cast<char>(character + ('a' - 'A'));
+        }
+    }
+    return key;
+}
+
+} // namespace
+
 ExpenseTree::ExpenseTree(Currency currency, std::string root_name)
     : currency_(std::move(currency)) {
     validate_name(root_name);
@@ -227,6 +255,60 @@ Money ExpenseTree::total(NodeId subtree, std::optional<DateRange> range) const {
         } else {
             pending.insert(pending.end(), current.children.begin(), current.children.end());
         }
+    }
+    return sum;
+}
+
+std::vector<NodeId> ExpenseTree::tagged_nodes(
+    NodeId subtree, std::string_view tag, std::optional<DateRange> range) const {
+    const auto key = tag_key(tag);
+    if (key.empty()) {
+        throw std::invalid_argument("Tag filter cannot be empty");
+    }
+    std::vector<NodeId> matches;
+    std::vector<NodeId> pending{subtree};
+    while (!pending.empty()) {
+        const auto id = pending.back();
+        pending.pop_back();
+        const auto& current = node(id);
+        if (current.kind == NodeKind::root || current.kind == NodeKind::group) {
+            // Reverse the stack insertion to visit children in display order.
+            pending.insert(pending.end(), current.children.rbegin(), current.children.rend());
+            continue;
+        }
+        const auto& expense = current.kind == NodeKind::item
+            ? *node(*current.parent_id).expense : *current.expense;
+        if ((!range || range->contains(expense.date)) &&
+            std::any_of(expense.tags.begin(), expense.tags.end(), [&](const auto& stored_tag) {
+                return tag_key(stored_tag) == key;
+            })) {
+            matches.push_back(id);
+        }
+        // Do not descend into a transaction's split items: that transaction
+        // and its full recorded amount have already been considered once.
+    }
+    return matches;
+}
+
+std::vector<NodeId> ExpenseTree::transactions_by_tag(
+    NodeId subtree, std::string_view tag, std::optional<DateRange> range) const {
+    auto matches = tagged_nodes(subtree, tag, range);
+    for (auto& id : matches) {
+        const auto& current = node(id);
+        if (current.kind == NodeKind::item) {
+            id = *current.parent_id;
+        }
+    }
+    return matches;
+}
+
+Money ExpenseTree::total_by_tag(
+    NodeId subtree, std::string_view tag, std::optional<DateRange> range) const {
+    Money sum{0, currency_};
+    for (const auto id : tagged_nodes(subtree, tag, range)) {
+        const auto& current = node(id);
+        sum = sum + (current.kind == NodeKind::item
+            ? *current.item_amount : current.expense->amount);
     }
     return sum;
 }

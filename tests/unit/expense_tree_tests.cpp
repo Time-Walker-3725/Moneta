@@ -214,6 +214,82 @@ void input_validation_and_money() {
     require(japanese.total(japanese.root_id()) == Money{198, jpy}, "Support currencies without decimal places");
 }
 
+void tag_queries() {
+    ExpenseTree tree{inr};
+    const auto entertainment = tree.add_group(tree.root_id(), "Entertainment");
+    const auto utilities = tree.add_group(tree.root_id(), "Utilities");
+    auto streaming_expense = purchase(19900);
+    streaming_expense.tags = {"#Subscription", "subscription", "Entertainment"};
+    const auto streaming = tree.add_expense(entertainment, "Streaming", streaming_expense);
+    auto unrelated_expense = purchase(1200);
+    unrelated_expense.tags = {"subscriptionExtra"};
+    const auto unrelated = tree.add_expense(entertainment, "One-time purchase", unrelated_expense);
+    auto gym_expense = purchase(50000, year{2026} / October / 11);
+    gym_expense.tags = {" SUBSCRIPTION ", "Health"};
+    const auto gym = tree.add_expense(utilities, "Gym", gym_expense);
+    auto cloud_expense = purchase(9000, year{2026} / November / 10);
+    cloud_expense.tags = {"subscription"};
+    const auto cloud = tree.add_expense(utilities, "Cloud storage", cloud_expense);
+    const auto parts = tree.split(streaming, {
+        {"Base", Money{15000, inr}, ""}, {"Extra", Money{4900, inr}, ""}});
+
+    require(tree.transactions_by_tag(tree.root_id(), "subscription") ==
+        std::vector<NodeId>{streaming, gym, cloud}, "Tag queries must cross categories in tree order");
+    require(tree.total_by_tag(tree.root_id(), " #SuBsCrIpTiOn ").minor_units() == 78900,
+        "Normalize tag spelling and count split/duplicate-tagged transactions only once");
+    require(tree.node(streaming).expense->tags == streaming_expense.tags,
+        "Filtering must not alter stored tag labels");
+    const DateRange october{year{2026} / October / 1, year{2026} / October / 31};
+    require(tree.total_by_tag(tree.root_id(), "subscription", october).minor_units() == 69900,
+        "Combine tag and date filters");
+    require(tree.transactions_by_tag(tree.root_id(), "subscription", october) ==
+        std::vector<NodeId>{streaming, gym}, "Date filter must constrain the result list");
+    require(tree.total_by_tag(tree.root_id(), "subscription", DateRange{purchase_date, purchase_date})
+        .minor_units() == 19900, "Tagged date endpoints must be inclusive");
+    require(tree.total_by_tag(utilities, "subscription").minor_units() == 59000,
+        "Restrict queries to the selected subtree");
+    require(tree.total_by_tag(streaming, "subscription").minor_units() == 19900,
+        "Query a tagged transaction directly");
+    require(tree.total_by_tag(parts[0], "subscription").minor_units() == 15000,
+        "An item inherits tags but contributes only its own amount");
+    require(tree.transactions_by_tag(parts[0], "subscription") == std::vector<NodeId>{streaming},
+        "An item query must return its owning transaction");
+    require(tree.total_by_tag(tree.root_id(), "sub").minor_units() == 0,
+        "Match full tags rather than substrings");
+    require(tree.transactions_by_tag(tree.root_id(), "missing").empty() &&
+        tree.total_by_tag(tree.root_id(), "missing").minor_units() == 0,
+        "Unmatched tags must return an empty list and zero spending");
+    tree.move(streaming, utilities);
+    tree.merge(streaming);
+    require(tree.total_by_tag(tree.root_id(), "subscription").minor_units() == 78900,
+        "Reclassification and merging must preserve tagged spending");
+    gym_expense.tags = {"Health"};
+    tree.update_expense(gym, gym_expense);
+    require(tree.total_by_tag(tree.root_id(), "subscription").minor_units() == 28900,
+        "Removing tags must immediately update query results");
+    unrelated_expense.tags.push_back("Subscription");
+    tree.update_expense(unrelated, unrelated_expense);
+    require(tree.total_by_tag(tree.root_id(), "subscription").minor_units() == 30100,
+        "Adding tags must immediately update query results");
+    for (const auto* empty_tag : {"", " \t", "#", " # \t"}) {
+        rejects<std::invalid_argument>([&] { (void)tree.total_by_tag(tree.root_id(), empty_tag); },
+            "Reject blank tag filters");
+        rejects<std::invalid_argument>([&] { (void)tree.transactions_by_tag(tree.root_id(), empty_tag); },
+            "Reject blank tag list filters");
+    }
+    rejects<std::out_of_range>([&] { (void)tree.total_by_tag(NodeId{999}, "subscription"); },
+        "Reject unknown tagged-query subtrees");
+
+    ExpenseTree huge{inr};
+    auto maximum = purchase(std::numeric_limits<std::int64_t>::max());
+    maximum.tags = {"subscription"};
+    huge.add_expense(huge.root_id(), "Maximum", maximum);
+    maximum.amount = Money{1, inr};
+    huge.add_expense(huge.root_id(), "Overflow", maximum);
+    rejects<std::overflow_error>([&] { (void)huge.total_by_tag(huge.root_id(), "subscription"); },
+        "Tagged totals must retain overflow protection");
+}
+
 void deep_and_wide_trees() {
     ExpenseTree tree{inr};
     auto deepest = tree.root_id();
@@ -241,8 +317,9 @@ int main() {
         date_queries();
         rejected_changes_preserve_tree();
         input_validation_and_money();
+        tag_queries();
         deep_and_wide_trees();
-        std::cout << "Passed all 5 expense-tree test suites\n";
+        std::cout << "Passed all 6 expense-tree test suites\n";
         return EXIT_SUCCESS;
     } catch (const std::exception& error) {
         std::cerr << "Expense-tree test failed: " << error.what() << '\n';
