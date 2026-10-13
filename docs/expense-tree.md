@@ -1,214 +1,131 @@
 # Expense tree design
 
-## Is a tree the right choice?
+Currency metadata uses a fixed three-byte code and one decimal-scale byte.
+`Money` combines that small value with signed 64-bit minor units; currency codes
+do not allocate a string per transaction. `Currency::code()` returns a borrowed
+`std::string_view` valid while the currency object lives.
 
-Yes, for a hierarchy where each category, transaction, or item has one parent.
-This is a general rooted tree: each node can have any number of children. A
-binary search tree would not model the expense hierarchy naturally.
+## Ownership and amounts
+
+Moneta uses a general rooted tree: categories, purchases, and receipt items each have one parent and ordered children. The node hash map provides stable identity; the parent/child links provide ownership and classification. A tree is appropriate for this hierarchy, while overlapping classifications belong in tags.
 
 ```text
-Expenses (root)
-└── Food (group)
-    └── Dominos (group)
-        └── Dinner (transaction, 19800 paise)
-            ├── Pizza (item, 15000 paise)
-            └── Taco (item, 4800 paise)
+Expenses
+└── Groceries
+    └── Walmart purchase (transaction)
+        ├── Meat (composite item, tag: Recurring)
+        │   ├── Chicken (item)
+        │   └── Beef (item)
+        └── Other (item)
 ```
 
-Categories and merchant folders both use group nodes; nesting is optional. A
-transaction can start directly under Food and move under Dominos later. The
-merchant is also stored on the transaction, so merchant identity survives
-reclassification. A group name is a display label, not a unique merchant ID.
+Root/group nodes contain categories or transactions. A transaction contains items; an item may itself contain items. All nested items belong to the same transaction. An unsplit transaction or item is a monetary leaf. Every parent stores the sum of its immediate children's amounts, giving O(1) all-time totals. Empty categories total zero.
 
-A tree alone does not support every accounting query efficiently. Use a ledger
-for account movements, a date index for chronological reports, and location
-records/indexes for geography. Persisting transactions and parent relationships
-in a database is compatible with this in-memory tree. A node-ID hash map gives
-expected O(1) lookup; the tree defines ownership and classification.
+Amounts are nonnegative signed 64-bit minor units in one currency/scale: 198 INR is 19,800 paise. Currency mismatches and overflow throw. `Money` itself permits signed values for future ledger use, but the expense tree currently rejects negative expenses.
 
-One transaction can only belong to one category path in this version. Tags allow
-overlapping classifications without copying the transaction. If a receipt must
-allocate spending across different category branches, add explicit allocation
-records whose amounts sum to the transaction total. Moving one existing split
-item to another category is deliberately rejected because it would violate
-the current transaction/item ownership model. Arbitrary overlapping category
-membership would need relations or a graph and an explicit counting rule.
+A transaction's separate `Expense.amount` is its canonical purchase amount and always equals the node total. Splitting/grouping/moving items preserves that amount. Editing an item leaf or deleting an item subtree corrects the canonical amount and ancestor totals. To change a split transaction's amount directly, merge it first or edit its monetary items.
 
-## Fields
+## Storage
 
-| Owner | Field | Purpose |
-| --- | --- | --- |
-| Tree | `currency` | Currency code and decimal scale shared by all amounts. |
-| Tree | `nodes` | Hash map of stable node IDs to node records. |
-| Tree | `next_id` | Generates nonzero IDs without reusing deleted IDs. |
-| Node | `id` | Stable identity within one tree; also identifies transactions. |
-| Node | `kind` | Root, group, transaction, or split item. |
-| Node | `name` | Editable display label. Names need not be unique. |
-| Node | `parent_id` | One parent; absent only on the root. |
-| Node | `children` | Ordered child IDs. An unsplit transaction has none. |
-| Transaction | `expense.amount` | Canonical recorded total in signed 64-bit minor units. |
-| Transaction | `expense.date` | Required calendar date used for range filtering. |
-| Transaction | `expense.account_id` | Required reference to the account that paid. |
-| Transaction | `expense.ledger_entry_id` | Optional link to a separately stored ledger entry. |
-| Transaction | `expense.location_id` | Optional link to separately stored location details. |
-| Transaction | `expense.merchant` | Merchant name independent of the category path. |
-| Transaction | `expense.note` | Transaction-level explanation. |
-| Transaction | `expense.tags` | Multiple overlapping labels without duplicating money. |
-| Item | `item_amount` | Component of its parent transaction's total. |
-| Item | `item_note` | Item-specific explanation. |
-| Date range | `first`, `last` | Valid, inclusive calendar-date endpoints. |
-
-`expense` is present only on transactions; `item_amount` only on items. Root and
-group nodes have neither. Read access returns const nodes, and the container
-validates all writes. Item dates, accounts, locations, and merchant information
-are inherited through the parent transaction, so metadata does not drift when
-the transaction is corrected. Use IDs for references rather than keeping node
-pointers across deletions. IDs are local to one tree, not global database IDs;
-persistence will need to restore them and the allocation counter consistently.
-
-Account, ledger, and location IDs are separate typed identifiers. This container
-checks that supplied IDs are nonzero; the application/storage layer must validate
-that the referenced records exist. Coordinates and addresses belong in the
-location store. Balances, income, loan principal, investments, and exchange rates
-do not belong on expense nodes.
-
-## Tag filtering
-
-Tags classify a transaction across category boundaries. For example, a streaming
-payment under Entertainment and a gym payment under Health can both carry the
-`Subscription` tag. They remain in their existing tree branches while a tag
-query can list them together and calculate their combined spending.
-
-```cpp
-// Add a label to an existing transaction without changing its accounting data.
-auto expense = *tree.node(transaction_id).expense;
-expense.tags.push_back("#Subscription");
-tree.update_expense(transaction_id, expense);
-
-const auto subscriptions = tree.transactions_by_tag(tree.root_id(), "subscription");
-const auto spent = tree.total_by_tag(tree.root_id(), "#Subscription");
-const auto monthly = tree.total_by_tag(tree.root_id(), "subscription", DateRange{
-    std::chrono::year{2026} / std::chrono::October / 1,
-    std::chrono::year{2026} / std::chrono::October / 31});
-```
-
-Both queries match the complete label, ignoring ASCII letter case, surrounding
-whitespace, and one optional leading `#`. `Subscription`, `#Subscription`, and
-`subscription` therefore match; `subscriptionExtra` does not. Stored labels are
-preserved as supplied. Unicode characters are compared exactly; Unicode case
-folding is not implemented. Blank query labels are rejected.
-
-Queries can start at the root, a group, or a transaction and can combine a tag
-with an inclusive date range. Split items inherit their parent's tags. A query
-starting at an item uses its parent transaction for matching; the list returns
-the transaction's ID, while the total contributes only that item's amount.
-Results follow tree order. No match produces an empty list and a zero total.
-
-A transaction with duplicate matching labels still appears once, and a split
-transaction contributes its recorded total once. Different tag reports can
-overlap: a transaction tagged both `Subscription` and `Work` belongs to both
-reports, so adding those two report totals can count it twice.
-
-Location is separate structured metadata: `location_id` points to a place record.
-A label such as `Subscription` describes a transaction without replacing its
-account, category, merchant, or location. Adding a label does not create a
-recurring payment schedule; recurrence will need its own model.
-
-## Accounting rules
-
-- Root and group nodes contain groups or transactions. Transactions contain
-  either zero items or at least two items. Items have no children.
-- Each expense and item has a nonnegative amount. `Money` can represent signed
-  values for future ledger use, but refunds need an explicit model before the
-  expense tree accepts them.
-- Monetary arithmetic uses integer minor units: 198 INR is 19800 paise. Currency
-  code and decimal scale must both match. Currency metadata must be supplied
-  from a trusted catalogue; the code does not implement that catalogue.
-- Split amounts must sum exactly to the canonical transaction amount. Retaining
-  the canonical amount keeps the accounting record stable while itemization
-  changes. Transaction totals therefore equal the sum of their items.
-- A group total visits transactions and counts each canonical amount once.
-  It does not also add the transaction's items. An individual item query counts
-  only that item. This is equivalent to summing leaves while the split invariant
-  holds, with less work for fully itemized transactions.
-- Moves, renames, splits, and merges preserve the transaction ID and accounting
-  metadata. Self-parenting, cycles, moving the root, and detaching individual
-  items are rejected.
-- Splitting an already split transaction replaces all its items with fresh IDs.
-  A rejected split preserves existing items. Merging removes itemization and
-  keeps the recorded transaction amount.
-- Explicit expense corrections and deletions may change totals. A split
-  transaction must be merged before changing its total, then split again if
-  needed. `erase_subtree` returns the amount removed.
-- Arithmetic overflow throws rather than silently wrapping. This also applies
-  to aggregate reports that exceed signed 64-bit minor units.
-
-Financial changes must eventually run through an application service that updates
-the ledger and expense records atomically in persistent storage. The tree itself
-does not change balances or save to disk. The current implementation is an
-in-memory container for use from one thread at a time.
-
-## Queries and complexity
-
-Let `v` be the number of visited group/transaction nodes, `s` the number of nodes
-in a deleted subtree, `h` the destination's depth, and `d` the old parent's child
-count. These bounds assume expected constant-time hash-map lookup and exclude
-the cost of copying text/metadata.
-
-| Operation | Time |
+| Record | Stored fields |
 | --- | --- |
-| Find by ID | Expected O(1) |
-| Add group or expense | Expected amortized O(1) |
-| Query transaction or item total | Expected O(1) |
-| Query group total, with or without a date range | Expected O(v) |
-| List transactions or total spending by tag | Expected O(v + inspected tag text) |
-| Move group or transaction | Expected O(h + d), plus amortized destination append |
-| Split or replace items | Expected O(new item count + old item count) |
-| Merge items | Expected O(item count) |
-| Delete subtree | Expected O(s + d) |
+| `ExpenseNode` | Stable ID, kind, name, parent ID, ordered child IDs, sorted explicit `TagId` vector, cached amount, owning transaction ID. |
+| `Expense` | Purchase amount/date, account ID, optional ledger/location IDs, merchant, transaction note. Stored only for transactions. |
+| Node notes | Nonempty category/item notes in a separate map; transaction notes remain in `Expense`. |
+| `TagDefinition` | Stable ID, display name, normalized lookup key. |
+| Tree | Currency, ID counters, node/purchase/note maps, tag registry/postings, revisions, lazy indexes, bounded view cache. |
 
-Totals and deletion use iterative traversal, so deeply nested categories do not
-consume the call stack. Traversal can use O(v) or O(s) temporary memory. Date
-queries still scan the subtree's transactions, including those outside the
-range; this is not yet an indexed range-query implementation.
+Categories and items reserve no space for complete purchase metadata. Items obtain date, account, location, merchant, and canonical purchase context through `transaction_id`. Their own names, amounts, notes, and explicit tags remain independent.
 
-Tag queries also scan the selected subtree and compare the eligible transactions'
-labels. They do not yet use a tag index. They can use O(v) traversal/result space
-plus temporary memory proportional to a normalized label's length.
+`NodeId` identifies a particular node even after a rename or move. It is neither an array position nor a DFS position. IDs are nonzero, local to a tree, and never reused after deletion. Restoring into an existing tree preserves allocation high-water marks, including undo followed by a different edit branch. Account, ledger, location, and tag IDs use distinct C++ types. External record existence is the application's responsibility.
 
-The first optimization should follow measured usage. Cached all-time subtree
-totals can make those reads O(1), with ancestor updates on edits. Arbitrary date
-ranges need another structure, such as a date index or maintained per-period
-aggregates/prefix sums. Fixed-range cached answers can be O(1); unrestricted
-date-range queries are not automatically O(1) merely because the data is a tree.
-No cached group totals, duplicate transaction dates, or stored depths are added
-in this version, avoiding additional consistency rules until they are needed.
+Child vectors preserve display order and provide direct pagination. Removing a child shifts siblings, costing O(d) for d siblings. This is a deliberate tradeoff for simple ordered storage. Arbitrarily deep user trees do not have logarithmic height; mutations updating ancestors cost O(h).
+
+## Explicit and inherited tags
+
+Every node kind can carry explicit tags in a sorted unique `vector<TagId>`. Small numeric vectors support binary-search membership without repeated string normalization or a hash allocation for every node. A registry resolves names once and allows renaming labels without rewriting node references.
+
+Registry lookup trims outer ASCII whitespace, removes one leading `#`, trims again, and lowercases ASCII letters. Display names preserve case. `Subscription` and `#SUBSCRIPTION` share an ID; Unicode bytes remain unchanged. Blank creation/rename is rejected, and renaming onto another tag's normalized name is rejected.
+
+A node effectively has a tag when it or any ancestor explicitly carries it. Tags inherit positively: removing a child's explicit tag does not cancel the same tag inherited from a parent. Repeated tags at different depths never multiply amounts. For `TagMatch::all`, the requested tags may come from different ancestors along a leaf's path.
+
+Only matching monetary leaves contribute to a filtered total. Untagged ancestors remain as connecting rows when they contain matches. An item-level tag selects that item's portion of a purchase, and the transaction list returns its owning purchase once. Queries scoped to a subtree still respect tags on ancestors above that subtree. Zero-valued matching leaves remain visible.
+
+## Refining and editing purchases
+
+`split` applies to a transaction or nested item, requiring at least two new components whose amounts sum exactly to its current total. Splitting an existing composite replaces its descendants with fresh IDs. The original node's metadata/tags remain; removed descendant labels and notes disappear.
+
+`merge` removes descendants and turns that transaction/item back into a monetary leaf of the same amount. Descendant labels/notes are intentionally removed. `group_items` groups selected sibling items in their existing order without changing their IDs. `ungroup_items` promotes its children and copies the removed group's explicit tags onto them to preserve tag membership.
+
+Items may move only within their owning purchase, into a composite item or a zero-valued leaf. Categories and transactions move under category nodes. Moves reject cycles and root relocation. The implementation finds the common ancestor path and changes only ancestors unique to the source/destination paths; common ancestors retain their total, avoiding temporary overflow on a total-preserving move.
+
+Deletion returns the removed amount and removes descendant records and explicit tag postings. Batch import uses an explicit authoritative-tree copy, applies all records to that candidate, then replaces the original only on success. This keeps the API simple and atomic but makes small batches on large trees relatively expensive.
+
+## Queries and lazy indexes
+
+The tree maintains an inverted index from each tag to nodes explicitly carrying it. It does not store inherited tags on every descendant.
+
+A query lazily builds a DFS index containing preorder rows, subtree leaf intervals, compact leaf metadata, and amount prefix sums. A tagged node covers one contiguous leaf interval. Query preparation merges coverage intervals for any-tag matching or intersects coverage for all-tag matching. Prefix subtraction totals those disjoint intervals without visiting their leaves or double counting overlap.
+
+A separate global date index sorts monetary leaves by transaction date and adds amount prefixes. Once built, whole-tree date-only totals use two binary searches. Tag/date/account/location combinations use the prepared tag ranges and inspect numeric leaf metadata. For totals with a date range, the implementation chooses between scanning covered leaves and inspecting the cheaper date candidate set with range-membership tests. It does not maintain an independent logarithmic index for every category/tag/account/location combination.
+
+The first structural index costs O(n); the first date index costs O(L log L). Names, notes, merchant/ledger metadata, and tag edits reuse these indexes. Changes to amounts, dates, account/location, or topology advance `data_revision`; the next relevant query rebuilds its lazy indexes. All changes advance the view revision. Logical invalidation is constant work, but reclamation of old arrays/views can be deferred to replacement or eviction.
+
+See [operations and complexity](operations.md) for complete bounds, including tag-root sorting and candidate scanning.
+
+## Filtered views and cache
+
+`filter_tree` returns `shared_ptr<const FilteredTree>`, a flat preorder array of `(NodeId, parent row index, filtered amount)`. The source tree is unchanged. Rows reference source IDs instead of copying purchase metadata and strings.
+
+On a cache miss, the implementation identifies matching leaves, rolls amounts up the selected subtree, and emits matching leaves plus their ancestors. Constructing a complete view can require O(n) work even when relatively few rows survive. Cache entries are keyed by source revision, subtree, and normalized filter. A hit returns the same immutable shared object after a small bounded cache lookup.
+
+Cache budgets limit both entry count and total cached rows; oversized views are returned without caching. The defaults are four entries and 100,000 rows. Callers holding shared views keep their memory alive after eviction. Returned rows remain immutable after edits, but metadata referenced by their IDs may have changed or been deleted: check the revision before resolving them against the current tree.
 
 ## Example
 
 ```cpp
 #include "moneta/expenses/expense_tree.hpp"
+#include "moneta/expenses/expense_history.hpp"
+#include "moneta/storage/expense_store.hpp"
 
 using namespace moneta;
 using namespace std::chrono;
 
 const Currency inr{"INR", 2};
 ExpenseTree tree{inr};
-const auto food = tree.add_group(tree.root_id(), "Food");
-const auto dinner = tree.add_expense(food, "Dinner", Expense{
+const auto recurring = tree.create_tag("Recurring");
+const auto groceries = tree.add_group(tree.root_id(), "Groceries");
+const auto purchase = tree.add_expense(groceries, "Walmart", Expense{
     Money{19800, inr}, year{2026} / October / 10, AccountId{1},
-    std::nullopt, std::nullopt, "Dominos", "", {}});
+    std::nullopt, LocationId{3}, "Walmart", "Receipt"});
+const auto parts = tree.split(purchase, {
+    {"Meat", Money{15000, inr}, "", {recurring}},
+    {"Other", Money{4800, inr}, "", {}}});
+const auto meat = tree.split(parts[0], {
+    {"Chicken", Money{10000, inr}, "", {}},
+    {"Beef", Money{5000, inr}, "", {}}});
 
-const auto items = tree.split(dinner, {
-    {"Pizza", Money{15000, inr}, ""},
-    {"Taco", Money{4800, inr}, ""}});
+QueryFilter filter;
+filter.tags = {recurring};
+filter.dates = DateRange{year{2026} / October / 1, year{2026} / October / 31};
+const auto spent = tree.filtered_total(groceries, filter); // 15000 paise.
+const auto view = tree.filter_tree(groceries, filter);
 
-const auto spent = tree.total(food); // 19800 paise, not 39600.
-const auto pizza = tree.total(items.front()); // 15000 paise.
-const auto daily = tree.total(food, DateRange{
-    year{2026} / October / 10, year{2026} / October / 10});
+ExpenseHistory history{5};
+history.checkpoint(tree); // Opt in before the edit.
+tree.update_item(meat[0], Money{11000, inr}); // Purchase becomes 20800 paise.
+history.undo(tree); // Restore 19800, preserving future ID allocation safety.
+
+save_tree_file("expenses.moneta", tree);
+auto restored = load_tree_file("expenses.moneta");
 ```
 
-Calendar dates are supplied by the caller; this module does not convert timestamps
-or choose a timezone. Location and account stores, persistence, refunds, receipt
-attachments, audit history, and indexes remain separate future work.
+## Persistence and history
+
+`save_tree`/`load_tree` provide a versioned text format preserving IDs, currency, ordering, tags, notes, and canonical metadata. Loading bounds declared arrays/text, validates graph ownership and totals, and rejects malformed/truncated/trailing data. Query caches and revisions are not persisted.
+
+File saving writes/closes a temporary file on the destination filesystem and then renames it atomically. Failed writes leave an existing destination untouched; crash durability through `fsync` is not provided. CSV export writes monetary leaves, including explicit/effective tags and purchase metadata, with RFC 4180 quoting. It is a report export; CSV import is not implemented.
+
+`ExpenseHistory` is optional bounded snapshot history. Checkpoint before an edit; ordinary tree operations do not automatically copy history. Undo/redo validates and restores full snapshots. Each entry costs approximately the authoritative tree's storage, and checkpoint sorting/copying is expensive for large trees. Capacity zero disables checkpointing.
+
+The container is single-threaded and does not update account balances. Calendar dates are supplied by callers; timestamp/timezone conversion, refunds, recurring schedules, multi-currency conversion, and cross-category allocation records need their own models. Disk/network latency and a particular interactive response time are not implied by asymptotic bounds.

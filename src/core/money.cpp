@@ -7,13 +7,14 @@
 
 namespace moneta {
 
-Currency::Currency(std::string code, std::uint8_t decimal_places)
-    : code_(std::move(code)), decimal_places_(decimal_places) {
-    if (code_.size() != 3 || !std::all_of(code_.begin(), code_.end(), [](char c) {
+Currency::Currency(std::string_view code, std::uint8_t decimal_places)
+    : decimal_places_(decimal_places) {
+    if (code.size() != 3 || !std::all_of(code.begin(), code.end(), [](char c) {
             return c >= 'A' && c <= 'Z';
         }) || decimal_places_ > 9) {
         throw std::invalid_argument("Currency requires a three-letter uppercase code and 0..9 decimal places");
     }
+    std::copy(code.begin(), code.end(), code_.begin());
 }
 
 Money::Money(std::int64_t minor_units, Currency currency)

@@ -5,7 +5,7 @@
 
 namespace moneta {
 
-// Zero is reserved for an invalid/unassigned ID. IDs are local to their store.
+// O(1) scalar comparisons. Zero is invalid/unassigned; IDs are store-local.
 template <typename Tag>
 struct Identifier {
     std::uint64_t value{};
@@ -16,5 +16,6 @@ using NodeId = Identifier<struct NodeTag>;
 using AccountId = Identifier<struct AccountTag>;
 using LedgerEntryId = Identifier<struct LedgerEntryTag>;
 using LocationId = Identifier<struct LocationTag>;
+using TagId = Identifier<struct ExpenseTag>;
 
 } // namespace moneta

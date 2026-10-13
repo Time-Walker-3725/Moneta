@@ -6,7 +6,6 @@
 
 #include <optional>
 #include <string>
-#include <vector>
 
 namespace moneta {
 
@@ -20,7 +19,6 @@ struct Expense {
     std::optional<LocationId> location_id;
     std::string merchant;
     std::string note;
-    std::vector<std::string> tags; // Free-form labels; preserved as supplied.
 };
 
 } // namespace moneta

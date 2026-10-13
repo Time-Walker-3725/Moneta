@@ -1,189 +1,108 @@
 # Moneta
 
-Moneta is an accounting application being developed entirely in C++. Its backend will be fully C++ based, with a focus on correctness, reliable persistence, and clear interfaces before frontend development.
-
-Trees will be the primary data structure for organizing expenses and calculating expense totals. Income, accounts, debts, and investments will have separate models; income does not belong in the expense tree.
-
-The first implemented module is the C++20 expense tree. See [the expense tree design](docs/expense-tree.md) for its fields, accounting invariants, API example, and the limits of using a tree for financial queries.
-
-## Transaction tree
-
-Users can record a simple transaction first, then refine its categories or split it into more detailed items later.
-
-For example, an expense can begin as **Food: 198 INR**, later become **Food → Dominos: 198 INR**, and finally be split into **Pizza: 150 INR** and **Taco: 48 INR** under the same Dominos transaction.
+Moneta is a C++20 accounting backend. Its expense tree organizes purchases, categories, and nested receipt items while preserving exact integer amounts. Accounts, the ledger, income, debts, investments, and a frontend remain separate planned modules.
 
 ```text
 Expenses                         198 INR
 └── Food                         198 INR
-    └── Dominos                  198 INR
-        └── Transaction          198 INR
-            ├── Pizza            150 INR
-            └── Taco              48 INR
+    └── Dinner                   198 INR
+        ├── Pizza                150 INR
+        └── Taco                  48 INR
 ```
 
-Food can contain multiple restaurant nodes, and each restaurant can contain multiple transactions. Transactions are tree nodes: an unsplit transaction is a leaf, while a split transaction becomes a parent of its item nodes.
+An unsplit purchase carries its amount. Splitting it replaces that amount with its components for aggregation; parent and component amounts are never added together. Every node caches its all-time subtree sum. Moving or refining a purchase preserves its total; correcting or deleting an item changes the purchase's recorded amount.
 
-## Amounts and aggregation
+## Implemented backend
 
-- A leaf stores an individual amount.
-- A parent node's value is the sum of its immediate children's values, recursively representing the total of all leaves in its subtree.
-- Splitting a transaction preserves its total: 150 INR + 48 INR = 198 INR.
-- Parent totals and child amounts must not be counted twice. A split replaces the original undivided amount with its component amounts.
+- Ordered categories, purchases, nested items, grouping, splitting, merging, moves, corrections, deletion, and atomic batch imports.
+- Stable typed IDs and sorted numeric tag IDs on every kind of node. Explicit tags inherit downward without copying labels into descendants.
+- Any/all tag filters combined with inclusive dates, account, and location; transaction lists, leaf lists, and immutable filtered tree views.
+- Explicit-tag postings, lazy leaf intervals/prefix sums, a lazy global date index, and bounded filtered-view caching.
+- Validated snapshots, versioned stream/file persistence, leaf-based CSV export, and optional bounded undo/redo history.
 
-This lets the same tree provide totals for all expenses, a category such as Food, a restaurant such as Dominos, or an individual transaction.
+[Expense tree design](docs/expense-tree.md) explains the model and API. [Operations and complexity](docs/operations.md) records the actual costs and index invalidation rules. All-time total reads are O(1); combined queries and complete filtered views can still require linear work. Performance depends on data, hardware, compiler settings, and whether indexes/caches are warm.
 
-## Transaction metadata
+## Tags and filters
 
-Every transaction has a date attached as metadata. Users can also provide optional location data. Refining categories or splitting an existing transaction must preserve its accounting context, including its date and any supplied location.
+```cpp
+#include "moneta/expenses/expense_tree.hpp"
 
-## Totals over time
+using namespace moneta;
+using namespace std::chrono;
 
-The application must support calculating money spent during a selected date range, both across expenses and within a chosen subtree.
+const Currency inr{"INR", 2};
+ExpenseTree tree{inr};
+const auto subscriptions = tree.create_tag("Subscription");
+const auto entertainment = tree.add_group(tree.root_id(), "Entertainment");
+tree.add_expense(entertainment, "Streaming", Expense{
+    Money{19900, inr}, year{2026} / October / 10, AccountId{1},
+    std::nullopt, std::nullopt, "Streaming service", ""}, {subscriptions});
 
-The target query complexity is **O(1) to O(n)**, where `n` is the number of relevant transaction or item leaves examined. A direct traversal can calculate a range total in O(n). Faster queries will require suitable date indexes or cached aggregates; a cached subtree total alone does not provide O(1) queries for arbitrary date ranges. The indexing and caching strategy remains to be designed.
+QueryFilter filter;
+filter.tags = {subscriptions};
+filter.dates = DateRange{year{2026} / October / 1, year{2026} / October / 31};
+const auto spent = tree.filtered_total(tree.root_id(), filter); // 19900 paise.
+const auto view = tree.filter_tree(tree.root_id(), filter);
+```
 
-## Planned capabilities
+Tags belong to nodes, not to `Expense` metadata. A category tag includes its descendant purchases; an item tag can select only part of a receipt. Distinct tag reports can overlap, while a single report always counts each monetary leaf once.
 
-- **Spending reports:** View overall expenses, monthly expenses, and expenses within any selected date range, including totals for individual categories or subtrees.
-- **Tag reports:** Label transactions across categories, then list and total matches such as `#Subscription`, optionally within a selected date range. The in-memory tree supports these queries now.
-- **Location reports:** Track where money is spent and filter location totals by date range.
-- **Accounts and balances:** Manage cash and bank accounts, opening balances, deposits, withdrawals, and transfers; calculate current balances from recorded ledger entries.
-- **Income:** Record incoming money separately from expenses.
-- **Debtors and creditors:** Track money owed to the user and money the user owes others, including partial repayments and outstanding balances.
-- **Investments:** Record stock purchases and sales, track holdings, and calculate portfolio value using dated price quotes. Return calculations should account for purchase costs, fees, and dividends.
-- **Deposit assets:** Support fixed deposits or similar interest-bearing assets, tracking principal, interest, maturity, and valuation. These differ from depositing money into an account, which is a cash movement.
-- **Map visualization, in a later phase:** Display bubbles or indicators showing where money was spent and how much, with date-range filtering.
-
-For the map, the backend should return location summaries containing coordinates, amount spent, currency, and transaction count for the requested period. The frontend can render those summaries without calculating financial totals itself.
-
-## Accounting boundaries
-
-Money leaving an account is not always an expense. Transfers between the user's accounts, stock purchases, money lent to someone, and repayments of loan principal have different accounting meanings.
-
-The ledger records financial movements and supports account balances. The expense tree classifies actual expenses. An expense references the account that paid for it, so recording it must update the relevant financial records consistently without double counting.
-
-## Proposed file structure
-
-The following structure is a plan, not a list of files already implemented. Create modules as their features are developed rather than adding empty placeholders.
+## Layout
 
 ```text
-Moneta/
-├── CMakeLists.txt
-├── CMakePresets.json
-├── README.md
-├── docs/
-│   ├── architecture.md
-│   └── accounting-rules.md
-├── include/moneta/
-│   ├── core/
-│   │   ├── money.hpp
-│   │   ├── identifiers.hpp
-│   │   └── date_range.hpp
-│   ├── accounts/
-│   │   ├── account.hpp
-│   │   └── ledger_entry.hpp
-│   ├── expenses/
-│   │   ├── expense.hpp
-│   │   ├── expense_tree.hpp
-│   │   └── expense_split.hpp
-│   ├── income/
-│   │   └── income.hpp
-│   ├── locations/
-│   │   └── location.hpp
-│   ├── debts/
-│   │   ├── obligation.hpp
-│   │   └── repayment.hpp
-│   ├── investments/
-│   │   ├── trade.hpp
-│   │   ├── price_quote.hpp
-│   │   └── portfolio.hpp
-│   ├── reports/
-│   │   ├── spending_report.hpp
-│   │   ├── location_report.hpp
-│   │   └── net_worth_report.hpp
-│   └── application/
-│       └── finance_service.hpp
-├── src/
-│   ├── accounts/
-│   ├── expenses/
-│   ├── income/
-│   ├── locations/
-│   ├── debts/
-│   ├── investments/
-│   ├── reports/
-│   ├── application/
-│   └── storage/
-├── apps/
-│   └── cli/
-│       └── main.cpp
-└── tests/
-    ├── unit/
-    └── integration/
+include/moneta/core/       Money, dates, and typed identifiers
+include/moneta/expenses/   Public tree, tag, and history interfaces
+include/moneta/storage/    Persistence and CSV interfaces
+src/                      Implementations matching those modules
+tests/unit/              Dependency-free test executables
+benchmarks/               Optional deterministic performance workload
+docs/                    Design and operation reference
 ```
 
-Headers under `include/moneta/` describe public interfaces, with corresponding `.cpp` implementations under `src/`.
-
-| Module | Responsibility |
-| --- | --- |
-| `core` | Shared money, identifier, and date-range types. |
-| `accounts` | Accounts, ledger entries, transfers, and balance calculations. |
-| `expenses` | Expense categories, dated purchases, the expense tree, and splits. |
-| `income` | Incoming money recorded outside the expense tree. |
-| `locations` | Place names, addresses, and optional coordinates attached to expenses. |
-| `debts` | Obligations, repayments, and outstanding amounts. |
-| `investments` | Trades, holdings, dated prices, and portfolio calculations. |
-| `reports` | Spending, location, debt, portfolio, and net worth summaries. |
-| `application` | Operations that coordinate modules, such as recording an expense or repaying a debt. |
-| `storage` | Persistence, migrations, and atomic updates; financial rules remain in the financial modules. |
-| `apps/cli` | A command-line interface for exercising the backend before frontend development. |
-| `tests` | Unit tests for financial rules and integration tests for persistence and coordinated operations. |
-
-## Development roadmap
-
-1. Build shared types, accounts, the ledger, expenses, income, persistence, and date-range reports.
-2. Validate a complete workflow through the CLI: create an expense, categorize it, split it, move it, query totals by date, then save and reload it.
-3. Add location reports, debts and repayments, and investment tracking.
-4. Build the frontend against stable backend interfaces, with charts and map visualization in later phases.
-
-A central invariant is that rearranging or refining the expense tree must never accidentally create or lose money. Reliable backend interfaces will simplify frontend work, while transaction editing, charts, and maps will still require their own design and validation.
-
-## Additional feature ideas
-
-These are suggestions for future consideration, rather than commitments for the initial backend:
-
-- Category budgets with monthly progress.
-- Recurring expenses, recurring income, and payment reminders.
-- Search and filters by merchant, amount, date, category, and location.
-- CSV import/export, backups, and reliable restoration.
-- Receipt attachments and transaction notes.
-- Reconciliation against bank statements.
-- Debt due dates and repayment reminders.
-- Net worth history and portfolio gain/loss reports.
-- Multiple currencies with explicit exchange rates.
-- An edit history for reviewing and correcting changes.
-
-## Project status
-
-The in-memory expense tree, typed identifiers, integer money arithmetic, and inclusive date ranges are implemented. The tree supports groups, transactions, splits, merges, reclassification, corrections, deletion, subtree totals, and transaction lists/totals filtered by tag. Tests cover money preservation, metadata preservation, date/tag filtering, invalid operations, overflow, and deep/wide hierarchies.
-
-Accounts, ledger persistence, income, debts, investments, a CLI, and a frontend remain planned. Tree operations do not update account balances; a future application service must coordinate those changes with the ledger.
+Headers describe interfaces other code can include; source files implement them. Tree metadata references account, ledger, and location stores by typed IDs. The application must validate those external records and coordinate financial changes with the ledger; these tree operations do not calculate account balances.
 
 ## Build and test
 
-With a C++20 compiler and CMake 3.20 or newer:
+Install CMake separately from the compiler. Use a C++20 compiler and CMake 3.20 or newer:
 
 ```sh
-cmake -S . -B build
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-Without CMake, the dependency-free tests can also be built directly:
+On macOS, Apple Clang from Xcode Command Line Tools or a compatible Homebrew GCC can be selected through the CMake compiler kit. Clear the CMake cache after changing compilers. VS Code settings are local configuration and are not part of the library.
+
+Without CMake, compile and run each test directly from the repository root:
 
 ```sh
 mkdir -p build
-g++ -std=c++20 -Wall -Wextra -Wpedantic -Iinclude \
-    src/core/money.cpp src/expenses/expense_tree.cpp \
-    tests/unit/expense_tree_tests.cpp -o build/expense_tree_tests
-./build/expense_tree_tests
+for test in tests/unit/*_tests.cpp; do
+    name="${test##*/}"
+    name="${name%.cpp}"
+    g++ -std=c++20 -O2 -Wall -Wextra -Wpedantic -Iinclude \
+        src/core/*.cpp src/expenses/*.cpp src/storage/*.cpp \
+        "$test" -o "build/$name" || exit 1
+    "./build/$name" || exit 1
+done
 ```
+
+## Optional benchmark
+
+```sh
+cmake -S . -B build-bench -DCMAKE_BUILD_TYPE=Release -DMONETA_BUILD_BENCHMARKS=ON
+cmake --build build-bench --target expense_tree_benchmark
+./build-bench/expense_tree_benchmark --count 100000
+```
+
+For an explicit larger run:
+
+```sh
+./build-bench/expense_tree_benchmark --count 1000000
+```
+
+The benchmark defaults to 100,000 purchases and accepts at most 1,000,000. It measures construction, cold/warm totals, combined filtering, selective and complete views, cache reuse, inherited category tags, and edits/moves followed by index rebuilding. It checks results against independent arithmetic. [An example cloud run](docs/benchmarks.md) records the workload, timings, and memory use. These workload-specific measurements do not establish a 500 ms guarantee, disk performance, or network latency.
+
+## Planned accounting modules
+
+The ledger will record cash movements and support account balances. Income, transfers, loan principal, investments, and exchange-rate conversions need their own accounting rules. Future work includes account/ledger integration, income and obligations, investment tracking, location summaries, recurring schedules, and application interfaces. A tag named `Recurring` is a label; it does not schedule payments.
