@@ -57,3 +57,14 @@ cmake --build build-bench --target expense_tree_benchmark
 Use representative receipt depth, tag distributions, string lengths, and edits
 when assessing an application workload. Construction, file persistence,
 snapshot history, rendering, and network activity are separate costs.
+
+## Single-day tree view
+
+Two Release runs of the single-day workload on the onboarding machine (GCC 14.2, November 25, 2026) produced the following wall times. Both requests were view-cache misses with the structural index already built. The benchmark clears the view cache, runs a dated total to build the date index, and requests the identical day again. Each result is checked against independently calculated leaf counts and spending.
+
+| Purchases | Matching leaves | Scan with structural index only | Use existing date index |
+| ---: | ---: | ---: | ---: |
+| 100,000 | 274 | 0.50–0.60 ms | 0.070–0.076 ms |
+| 1,000,000 | 2,740 | 7.37–122.91 ms | 0.99–1.63 ms |
+
+The scan inspects every purchase. With the date index, this workload inspects the matching day's leaves and restores their tree order. Both paths then emit just the visible rows. Building the date index itself took 74–134 ms in the million-purchase runs. The wide variation in scan time illustrates why individual wall times should be read alongside the operation counts. See the [complexity reference](operations.md).

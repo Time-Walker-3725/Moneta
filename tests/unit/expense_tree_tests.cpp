@@ -402,6 +402,29 @@ void inheritance_and_combined_filters() {
     verify_queries(tree, tree.root_id(), filter, "Metadata edit refreshes date index");
 }
 
+void selective_date_views() {
+    ExpenseTree tree{inr};
+    const auto group = tree.add_group(tree.root_id(), "Scope");
+    const auto first = tree.add_group(group, "First");
+    const auto second = tree.add_group(group, "Second");
+    const Date rare = year{2024}/March/1;
+    tree.add_expense(second, "Last in preorder", purchase(0, rare));
+    for (int i = 0; i < 100; ++i) tree.add_expense(first, "Ordinary", purchase(1));
+    const auto split = tree.add_expense(first, "First in preorder", purchase(3, rare));
+    tree.split(split, {{"One", Money{1, inr}, {}, {}}, {"Two", Money{2, inr}, {}, {}}});
+    tree.add_expense(tree.root_id(), "Outside scope", purchase(50, rare));
+    QueryFilter filter;
+    filter.dates = DateRange{rare, rare};
+    const auto cold = tree.filter_tree(group, filter);
+    tree.clear_filter_cache();
+    verify_queries(tree, group, filter, "Selective warm date index and scoped sparse ancestors");
+    const auto warm = tree.filter_tree(group, filter);
+    require(cold->nodes.size() == warm->nodes.size() && warm->nodes.front().amount_minor_units == 3,
+        "Cold scan and warm index retain partial and zero-valued branches");
+    filter.dates = DateRange{year{2000}/May/1, year{2000}/May/2};
+    verify_queries(tree, group, filter, "No dates match");
+}
+
 void filtered_views_and_cache() {
     ExpenseTree tree{inr};
     const auto tag = tree.create_tag("Zero");
@@ -624,6 +647,7 @@ int main() {
         validation_and_overflow();
         tag_registry_and_sorted_storage();
         inheritance_and_combined_filters();
+        selective_date_views();
         filtered_views_and_cache();
         date_queries_navigation_and_search();
         atomic_import_and_copy();

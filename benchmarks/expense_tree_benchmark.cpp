@@ -194,6 +194,22 @@ void run(std::size_t count) {
     });
     require(result == expected_tag, "Warm tag total is incorrect");
 
+    QueryFilter one_day;
+    one_day.dates.emplace(date_for(0), date_for(0));
+    std::int64_t day_total = 0;
+    std::size_t day_leaves = 0;
+    for (std::size_t index = 0; index < count; index += 365) {
+        day_total += amount_for(index);
+        ++day_leaves;
+    }
+    auto measure_day_view = [&](std::string_view label) {
+        std::shared_ptr<const FilteredTree> view;
+        timed(label, [&] { view = tree.filter_tree(tree.root_id(), one_day); });
+        validate_view(tree, *view, day_total, day_leaves);
+        tree.clear_filter_cache();
+    };
+    measure_day_view("Single-day view (leaf scan)");
+
     // Cold date work builds its sorted date/prefix index, O(L log L); structural
     // indexing is already warm. The whole-tree warm date sum uses O(log L) bounds.
     timed("Date total cold (date index)", [&] {
@@ -204,6 +220,8 @@ void run(std::size_t count) {
         result = tree.filtered_total(tree.root_id(), date_filter).minor_units();
     });
     require(result == expected_date, "Warm date total is incorrect");
+
+    measure_day_view("Single-day view (date index warm)");
 
     // Combined predicates inspect candidate leaves: worst O(L), plus tag ranges.
     timed("Tag + date total (indexes warm)", [&] {
@@ -219,7 +237,7 @@ void run(std::size_t count) {
     require(matches.size() == combined_leaves && matching_total == expected_combined,
         "Matching leaf IDs disagree with reference arithmetic");
 
-    // View construction is O(n) worst case and allocates O(k) output rows. The
+    // After candidate selection, assembling k output rows costs O(k). The
     // generous row budget is explicit here so both benchmark sizes test a hit.
     // A production application should choose its cache budget for its memory cap.
     tree.set_filter_cache_limits(2, count + category_count + 1);

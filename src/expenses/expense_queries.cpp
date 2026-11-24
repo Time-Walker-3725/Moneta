@@ -13,13 +13,13 @@ namespace moneta {
 struct ExpenseTree::QueryIndex {
     struct Span {
         std::size_t preorder;
-        std::size_t preorder_end;
         std::size_t leaf_begin;
         std::size_t leaf_end;
     };
     struct Entry {
         NodeId id;
         std::size_t parent;
+        std::size_t preorder_end;
     };
     struct Leaf {
         NodeId id;
@@ -106,8 +106,8 @@ struct ExpenseTreeQueryAccess {
         auto enter = [&](NodeId id, std::size_t parent) {
             const auto& node = tree.nodes_.at(id.value);
             const auto position = replacement->preorder.size();
-            replacement->preorder.push_back({id, parent});
-            replacement->spans.emplace(id.value, Index::Span{position, position + 1,
+            replacement->preorder.push_back({id, parent, position + 1});
+            replacement->spans.emplace(id.value, Index::Span{position,
                 replacement->leaves.size(), replacement->leaves.size()});
             if (node.children.empty() &&
                 (node.kind == NodeKind::transaction || node.kind == NodeKind::item)) {
@@ -130,7 +130,7 @@ struct ExpenseTreeQueryAccess {
                 enter(child, parent);
             } else {
                 auto& span = replacement->spans.at(frame.id.value);
-                span.preorder_end = replacement->preorder.size();
+                replacement->preorder[span.preorder].preorder_end = replacement->preorder.size();
                 span.leaf_end = replacement->leaves.size();
                 stack.pop_back();
             }
@@ -289,7 +289,6 @@ struct ExpenseTreeQueryAccess {
         return leaf.day >= filter.first_day && leaf.day <= filter.last_day;
     }
 
-    // O(1). Empty categories carry no monetary contribution.
     // O(u) expected necessary condition: unused tag definitions and trees with
     // no purchases cannot yield matches, so no global index needs building.
     static bool coverage_possible(const ExpenseTree& tree, const QueryFilter& filter) {
@@ -346,19 +345,38 @@ struct ExpenseTreeQueryAccess {
         return after != ranges.begin() && leaf < std::prev(after)->end;
     }
 
-    // O(c+k), c=leaves in the selected coverage; output stays in tree order.
-    static std::vector<std::size_t> matching(const Index& index,
-        const std::vector<Range>& ranges, const QueryFilter& filter) {
-        std::vector<std::size_t> result;
+    // Emit matching leaf positions in tree order. Scanning costs O(c). If an
+    // earlier total built the date index, a narrow interval can instead cost
+    // O(log L + r + D*(log(r+1)+log(D+1))) including restoring tree order.
+    // Listing or displaying a filter alone never triggers a global date sort.
+    template<class Emit>
+    static void for_matches(const Index& index, const std::vector<Range>& ranges,
+        const QueryFilter& filter, Emit emit) {
+        if (ranges.empty()) return;
         const auto prepared = predicates(filter);
-        for (Range range : ranges) {
-            for (auto i = range.begin; i < range.end; ++i) {
-                if (accepts(index.leaves[i], prepared)) {
-                    result.push_back(i);
+        if (filter.dates && index.dates_ready) {
+            const auto dates = date_range(index, *filter.dates);
+            const auto date_count = dates.end - dates.begin;
+            std::size_t candidates = 0;
+            for (auto range : ranges) candidates += range.end - range.begin;
+            const auto cost = std::bit_width(ranges.size()) + std::bit_width(date_count);
+            if (date_count <= candidates / cost) {
+                std::vector<std::size_t> positions;
+                for (auto i = dates.begin; i < dates.end; ++i) {
+                    const auto leaf = index.dates[i].leaf;
+                    if (covered(leaf, ranges) && accepts(index.leaves[leaf], prepared))
+                        positions.push_back(leaf);
                 }
+                std::sort(positions.begin(), positions.end());
+                for (auto leaf : positions) emit(leaf);
+                return;
             }
         }
-        return result;
+        for (Range range : ranges) {
+            for (auto i = range.begin; i < range.end; ++i) {
+                if (accepts(index.leaves[i], prepared)) emit(i);
+            }
+        }
     }
 
     // Normalized-filter query cost: O(m log m+r) coverage preparation, plus
@@ -424,7 +442,7 @@ struct ExpenseTreeQueryAccess {
         return Money{sum, tree.currency_};
     }
 
-    // O(c+k), plus coverage preparation/lazy O(n) structure. Owners occupy
+    // for_matches cost plus O(k) emission and coverage/index preparation. Owners occupy
     // contiguous leaf intervals, so deduplication needs no allocation/hash set.
     // Direct leaf scope O(u*h*log(t+1)), without building any global index.
     static std::vector<NodeId> transaction_ids(const ExpenseTree& tree,
@@ -442,17 +460,11 @@ struct ExpenseTreeQueryAccess {
         }
         const auto& indexed = index(tree);
         const auto selected = ranges(tree, indexed, subtree, filter);
-        const auto prepared = predicates(filter);
         std::vector<NodeId> result;
-        for (auto range : selected) {
-            for (auto i = range.begin; i < range.end; ++i) {
-                const auto& leaf = indexed.leaves[i];
-                if (accepts(leaf, prepared) &&
-                    (result.empty() || result.back() != leaf.transaction)) {
-                    result.push_back(leaf.transaction);
-                }
-            }
-        }
+        for_matches(indexed, selected, filter, [&](auto i) {
+            const auto owner = indexed.leaves[i].transaction;
+            if (result.empty() || result.back() != owner) result.push_back(owner);
+        });
         return result;
     }
 
@@ -502,7 +514,7 @@ Money ExpenseTree::filtered_total(NodeId subtree, const QueryFilter& requested) 
     return ExpenseTreeQueryAccess::sum(*this, subtree, filter);
 }
 
-// O(c+k), plus O(u log u + m log m+r) preparation/lazy O(n) structural build.
+// for_matches selection + O(k) emission, plus normalization/range setup and cold O(n) index.
 // Direct leaf scope O(u*h*log(t+1)), plus filter normalization.
 std::vector<NodeId> ExpenseTree::matching_leaves(NodeId subtree, const QueryFilter& requested) const {
     const auto& source = node(subtree);
@@ -519,15 +531,9 @@ std::vector<NodeId> ExpenseTree::matching_leaves(NodeId subtree, const QueryFilt
     }
     const auto& index = ExpenseTreeQueryAccess::index(*this);
     const auto ranges = ExpenseTreeQueryAccess::ranges(*this, index, subtree, filter);
-    const auto prepared = ExpenseTreeQueryAccess::predicates(filter);
     std::vector<NodeId> result;
-    for (auto range : ranges) {
-        for (auto i = range.begin; i < range.end; ++i) {
-            if (ExpenseTreeQueryAccess::accepts(index.leaves[i], prepared)) {
-                result.push_back(index.leaves[i].id);
-            }
-        }
-    }
+    ExpenseTreeQueryAccess::for_matches(index, ranges, filter,
+        [&](auto i) { result.push_back(index.leaves[i].id); });
     return result;
 }
 
@@ -573,8 +579,8 @@ Money ExpenseTree::total_by_tag(NodeId subtree,
     return ExpenseTreeQueryAccess::sum(*this, subtree, filter);
 }
 
-// Miss: O(s + c + m log m + u log u), lazy structural build O(n), and O(s+k)
-// workspace/output. Hit: O(u log u + cache_capacity*u), excluding reclamation.
+// Miss: matching cost plus expected O(k) for k visible rows and lazy O(n)
+// structural build. Hit: O(u log(u+1) + cache_capacity*(u+1)), no row copies.
 // Direct leaf miss O(u*h*log(t+1)), plus normalization/cache metadata work.
 std::shared_ptr<const FilteredTree> ExpenseTree::filter_tree(
     NodeId subtree, const QueryFilter& requested) const {
@@ -601,41 +607,37 @@ std::shared_ptr<const FilteredTree> ExpenseTree::filter_tree(
     }
     const auto& index = ExpenseTreeQueryAccess::index(*this);
     const auto ranges = ExpenseTreeQueryAccess::ranges(*this, index, subtree, filter);
-    const auto matched = ExpenseTreeQueryAccess::matching(index, ranges, filter);
-    const auto& scope = index.spans.at(subtree.value);
-    const auto count = scope.preorder_end - scope.preorder;
-    std::vector<std::int64_t> amounts(count, 0);
-    std::vector<unsigned char> included(count, 0);
-    for (auto leaf : matched) {
-        const auto& record = index.leaves[leaf];
-        const auto position = index.spans.at(record.id.value).preorder - scope.preorder;
-        amounts[position] = record.amount;
-        included[position] = 1; // A matching zero-valued leaf must remain visible.
-    }
-    for (auto i = scope.preorder_end; i-- > scope.preorder;) {
-        const auto local = i - scope.preorder;
-        const auto parent = index.preorder[i].parent;
-        if (included[local] && parent != ExpenseTreeQueryAccess::no_parent && parent >= scope.preorder) {
-            amounts[parent - scope.preorder] += amounts[local];
-            included[parent - scope.preorder] = 1;
-        }
-    }
     auto result = std::make_shared<FilteredTree>();
     result->revision = revision_;
     result->root = subtree;
-    result->nodes.reserve(static_cast<std::size_t>(std::count(included.begin(), included.end(),
-        static_cast<unsigned char>(1))));
-    std::vector<std::size_t> row_indices(count, ExpenseTreeQueryAccess::no_parent);
-    for (auto i = scope.preorder; i < scope.preorder_end; ++i) {
-        const auto local = i - scope.preorder;
-        if (!included[local]) {
-            continue;
+    const auto root_position = index.spans.at(subtree.value).preorder;
+    struct Ancestor { std::size_t position; std::size_t row; };
+    std::vector<Ancestor> ancestors;
+    std::vector<std::size_t> path;
+    // Matches arrive in preorder. Pop ancestors whose subtree has ended, then
+    // climb only the missing path. Each output row is inserted and popped at
+    // most once: expected O(k) time, O(h) working space beyond matching/output.
+    ExpenseTreeQueryAccess::for_matches(index, ranges, filter, [&](auto leaf) {
+        const auto& record = index.leaves[leaf];
+        auto pos = index.spans.at(record.id.value).preorder;
+        while (!ancestors.empty() && index.preorder[ancestors.back().position].preorder_end <= pos)
+            ancestors.pop_back();
+        path.clear();
+        while (ancestors.empty() || pos != ancestors.back().position) {
+            path.push_back(pos);
+            if (pos == root_position) break;
+            pos = index.preorder[pos].parent;
         }
-        const auto& entry = index.preorder[i];
-        const auto parent = entry.parent == ExpenseTreeQueryAccess::no_parent || entry.parent < scope.preorder
-            ? ExpenseTreeQueryAccess::no_parent : row_indices[entry.parent - scope.preorder];
-        row_indices[local] = result->nodes.size();
-        result->nodes.push_back({entry.id, parent, amounts[local]});
+        for (auto it = path.rbegin(); it != path.rend(); ++it) {
+            const auto parent = ancestors.empty() ? ExpenseTreeQueryAccess::no_parent : ancestors.back().row;
+            ancestors.push_back({*it, result->nodes.size()});
+            result->nodes.push_back({index.preorder[*it].id, parent, 0});
+        }
+        result->nodes.back().amount_minor_units = record.amount;
+    });
+    for (auto i = result->nodes.size(); i > 1; --i) {
+        const auto& child = result->nodes[i - 1];
+        result->nodes[child.parent_index].amount_minor_units += child.amount_minor_units;
     }
     return ExpenseTreeQueryAccess::retain_view(*this, subtree, filter, std::move(result));
 }
