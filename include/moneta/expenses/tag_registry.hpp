@@ -33,7 +33,7 @@ public:
     // Expected O(1); throws out_of_range for unknown IDs.
     const TagDefinition& get(TagId id) const;
 
-    // Expected O(L); preserves ID and rejects names owned by another tag.
+    // Expected O(old + new name lengths); preserves ID and rejects conflicting names.
     void rename(TagId id, std::string_view name);
 
     // Expected O(L) for the stored name; erased IDs are never reused.

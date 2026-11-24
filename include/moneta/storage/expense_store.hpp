@@ -18,7 +18,7 @@ struct LoadLimits {
 };
 
 // Versioned UTF-8-preserving text; IDs, ordering and canonical metadata persist.
-// Caches and revisions do not. save: O(n log n + B), snapshot+bytes; O(n+B)
+// Caches and revisions do not. save: O(n log(n+1) + T log(T+1) + B), T=tag definitions; O(n+T+B)
 // temporary storage. load: expected O(n+references+B), including validation.
 // B includes all processed text/file bytes. Invalid/truncated data, extra data,
 // or exceeded limits throw; stream failures throw std::runtime_error.
@@ -35,8 +35,8 @@ void save_tree_file(const std::filesystem::path& path, const ExpenseTree& tree);
 // Export atomic monetary leaves, never purchase+split totals together. Dates
 // and account metadata belong to the owning transaction; explicit/effective
 // tag columns refer to each leaf. RFC 4180 quoting preserves commas/newlines.
-// O(query preparation+candidates+k*(h+A log A)+B), effective_tags per leaf;
-// O(k+max row bytes) temporary storage. No filtered-tree copy is constructed.
+// O(matching-leaf query + k*(h+A log(A+1))+B), effective_tags per leaf;
+// O(k+A+max row bytes) beyond query preparation. No filtered-tree copy is constructed.
 void export_expenses_csv(std::ostream& output, const ExpenseTree& tree,
     NodeId subtree, const QueryFilter& filter = {});
 

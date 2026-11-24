@@ -77,7 +77,7 @@ See [operations and complexity](operations.md) for complete bounds, including ta
 
 `filter_tree` returns `shared_ptr<const FilteredTree>`, a flat preorder array of `(NodeId, parent row index, filtered amount)`. The source tree is unchanged. Rows reference source IDs instead of copying purchase metadata and strings.
 
-On a cache miss, the implementation identifies matching leaves, rolls amounts up the selected subtree, and emits matching leaves plus their ancestors. Constructing a complete view can require O(n) work even when relatively few rows survive. Cache entries are keyed by source revision, subtree, and normalized filter. A hit returns the same immutable shared object after a small bounded cache lookup.
+On a cache miss, the implementation identifies matching leaves, emits each matching leaf and its ancestors once, and rolls up amounts in reverse output order. View assembly takes expected O(visible rows) after candidate selection. A cold index build or a broad candidate scan can still take O(n). Cache entries are keyed by source revision, subtree, and normalized filter. A hit returns the same immutable shared object after a small bounded cache lookup.
 
 Cache budgets limit both entry count and total cached rows; oversized views are returned without caching. The defaults are four entries and 100,000 rows. Callers holding shared views keep their memory alive after eviction. Returned rows remain immutable after edits, but metadata referenced by their IDs may have changed or been deleted: check the revision before resolving them against the current tree.
 
@@ -128,4 +128,4 @@ File saving writes/closes a temporary file on the destination filesystem and the
 
 `ExpenseHistory` is optional bounded snapshot history. Checkpoint before an edit; ordinary tree operations do not automatically copy history. Undo/redo validates and restores full snapshots. Each entry costs approximately the authoritative tree's storage, and checkpoint sorting/copying is expensive for large trees. Capacity zero disables checkpointing.
 
-The container is single-threaded and does not update account balances. Calendar dates are supplied by callers; timestamp/timezone conversion, refunds, recurring schedules, multi-currency conversion, and cross-category allocation records need their own models. Disk/network latency and a particular interactive response time are not implied by asymptotic bounds.
+The container is single-threaded and does not update account balances. Callers supply calendar dates. The accounting book coordinates cash postings, currency transfers and recurring schedules with its currency-specific trees. Disk/network latency and a particular interactive response time are not implied by asymptotic bounds.

@@ -847,12 +847,16 @@ ExpenseTree ExpenseTree::from_snapshot(TreeSnapshot snapshot) {
 }
 
 void ExpenseTree::restore(TreeSnapshot snapshot) {
-    auto candidate = from_snapshot(std::move(snapshot));
+    replace_validated(from_snapshot(std::move(snapshot)));
+}
+
+void ExpenseTree::replace_validated(ExpenseTree&& candidate) {
     candidate.next_id_ = std::max(candidate.next_id_, next_id_);
     candidate.tags_.next_id_ = std::max(candidate.tags_.next_id_, tags_.next_id());
     if (revision_ == std::numeric_limits<std::uint64_t>::max()) {
         throw std::overflow_error("Tree revision exhausted");
     }
+    candidate.clear_filter_cache();
     candidate.revision_ = revision_ + 1;
     candidate.cache_entries_ = cache_entries_;
     candidate.cache_rows_ = cache_rows_;

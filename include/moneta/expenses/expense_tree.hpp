@@ -93,6 +93,7 @@ public:
     [[nodiscard]] NodeId root_id() const noexcept { return NodeId{1}; }
     [[nodiscard]] const Currency& currency() const noexcept { return currency_; }
     [[nodiscard]] std::size_t size() const noexcept { return nodes_.size(); }
+    [[nodiscard]] std::size_t transaction_count() const noexcept { return expenses_.size(); }
     [[nodiscard]] std::uint64_t revision() const noexcept { return revision_; }
     [[nodiscard]] bool contains(NodeId id) const noexcept { return nodes_.contains(id.value); }
     // Expected O(1). References expire on deletion or tree replacement.
@@ -157,7 +158,7 @@ public:
     // O(s+h+d+removed tags). Root deletion forbidden. Item deletion corrects
     // its owning purchase's canonical amount.
     Money erase_subtree(NodeId id);
-    // O(n+stored text/tags+batch*h). Atomic batch through an explicit copy.
+    // Authoritative copy + sum of add_expense costs (including tag normalization).
     std::vector<NodeId> import_expenses(std::vector<NewExpense> batch);
 
     // O(1) without dates; otherwise delegates to filtered_total.
@@ -168,7 +169,9 @@ public:
     // Monetary-leaf scopes bypass indexes: O(u*h*log(t+1)) inherited tag checks.
     // Empty scopes/no purchases/unused tag coverage bypass index construction.
     [[nodiscard]] Money filtered_total(NodeId subtree, const QueryFilter& filter = {}) const;
-    // O(c+k), plus index/range preparation; IDs follow tree order.
+    // Scan O(c+k), plus index/range preparation. With a warm date index,
+    // narrow dates may use O(log L + r + D*(log(r+1)+log(D+1))) instead.
+    // D is the global date match count. Both paths preserve tree order.
     [[nodiscard]] std::vector<NodeId> matching_leaves(NodeId subtree, const QueryFilter& filter = {}) const;
     [[nodiscard]] std::vector<NodeId> transactions(NodeId subtree, const QueryFilter& filter = {}) const;
     // Name resolution then query cost. Unknown tag empty/zero; blank invalid.
@@ -176,7 +179,8 @@ public:
         std::string_view tag, std::optional<DateRange> range = std::nullopt) const;
     [[nodiscard]] Money total_by_tag(NodeId subtree, std::string_view tag,
         std::optional<DateRange> range = std::nullopt) const;
-    // Miss O(s+c+m log m+u log u), plus cold O(n) index build; O(s+k) space.
+    // Miss: matching_leaves selection cost + expected O(k) for k visible rows
+    // (ancestors included). Path stacks use O(h) beyond selection and output.
     // Monetary-leaf scopes bypass indexes. Hit O(u log u+capacity*(u+1));
     // returns a shared immutable view with no row copying.
     [[nodiscard]] std::shared_ptr<const FilteredTree> filter_tree(
@@ -189,7 +193,7 @@ public:
     // case-sensitive substring search.
     [[nodiscard]] std::vector<NodeId> search(NodeId subtree, std::string_view text) const;
 
-    // O(n+tags/text), plus O(n log n) sorting for deterministic ID-order output.
+    // O(n log(n+1) + T log(T+1) + references + text), T=tag definitions.
     [[nodiscard]] TreeSnapshot snapshot() const;
     // Expected O(n+tag references+text). Validate graph, totals, and ownership.
     [[nodiscard]] static ExpenseTree from_snapshot(TreeSnapshot snapshot);
@@ -198,6 +202,8 @@ public:
 
 private:
     friend struct ExpenseTreeQueryAccess;
+    friend class Book; // Validates purchase links and adopts an already valid tree.
+    void replace_validated(ExpenseTree&& candidate);
     struct QueryIndex;
     struct CachedView {
         NodeId root;

@@ -13,11 +13,11 @@ class ExpenseHistory {
 public:
     explicit ExpenseHistory(std::size_t capacity = 20) : capacity_(capacity) {}
 
-    // O(n log n+B+D), deterministic snapshot; D=discarded snapshot data.
+    // O(n log(n+1)+T log(T+1)+B+D), T=tag definitions; D=discarded snapshot data.
     // Clears redo after a new branch and evicts entries beyond capacity.
     // A zero capacity disables checkpointing without copying the tree.
     void checkpoint(const ExpenseTree& tree);
-    // O(n log n+B) to save the present, then expected O(n+references+B) restore.
+    // O(n log(n+1)+T log(T+1)+B) to save the present, then expected O(n+references+B) restore.
     // Empty histories return false. Failed restores retain both histories.
     // ExpenseTree::restore preserves ID high-water marks across undo branches.
     bool undo(ExpenseTree& tree);

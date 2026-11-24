@@ -1,6 +1,6 @@
 # Moneta
 
-Moneta is a C++20 accounting backend. Its expense tree organizes purchases, categories, and nested receipt items while preserving exact integer amounts. Accounts, the ledger, income, debts, investments, and a frontend remain separate planned modules.
+Moneta is a C++20 accounting backend. Its expense tree organizes purchases, categories, and nested receipt items while preserving exact integer amounts. Its accounting book records cash movements, income, debt principal, fixed-interest investments, currency exchanges, and scheduled payments.
 
 ```text
 Expenses                         198 INR
@@ -21,6 +21,36 @@ An unsplit purchase carries its amount. Splitting it replaces that amount with i
 - Validated snapshots, versioned stream/file persistence, leaf-based CSV export, and optional bounded undo/redo history.
 
 [Expense tree design](docs/expense-tree.md) explains the model and API. [Operations and complexity](docs/operations.md) records the actual costs and index invalidation rules. All-time total reads are O(1); combined queries and complete filtered views can still require linear work. Performance depends on data, hardware, compiler settings, and whether indexes/caches are warm.
+
+## Accounting book
+
+```cpp
+#include "moneta/storage/book_database.hpp"
+
+using namespace moneta;
+using namespace std::chrono;
+
+BookDatabase db{"household.sqlite"};
+const Currency usd{"USD", 2};
+const Date today = year{2026}/November/25;
+if (db.book().accounts().empty()) {
+    db.edit("Set up checking", [&](Book& book) {
+        auto checking = book.open_account("Checking", usd);
+        book.opening(checking, Money{100000, usd}, today);
+    });
+}
+const auto revision = db.edit("Buy groceries", [&](Book& book) {
+    book.spend(AccountId{1}, Money{1250, usd}, today, "Groceries");
+}); // Durable when edit returns.
+const auto balance = db.book().account(AccountId{1}).balance;
+db.undo(); // Reverse the payment and remove the receipt from active reports.
+db.redo(); // Reapply the same payment.
+auto earlier = db.at(revision); // Independent snapshot.
+```
+
+One SQLite file holds the current book, its revision branches and its financial audit. Each successful edit commits immediately. See the [storage guide](docs/sqlite.md) for migration, backups, history lookup and recovery.
+
+Use the book for coordinated cash and expense writes. Each currency has an independent expense tree. A payment creates one journal entry and one linked purchase. Splits change how spending is classified while preserving the payment. The [accounting API guide](docs/accounting.md) covers debt, FX, schedules, editing receipts, persistence and importing an existing tree.
 
 ## Tags and filters
 
@@ -50,20 +80,19 @@ Tags belong to nodes, not to `Expense` metadata. A category tag includes its des
 ## Layout
 
 ```text
+include/moneta/accounting/  Book, journal, schedules and exchange rates
 include/moneta/core/       Money, dates, and typed identifiers
 include/moneta/expenses/   Public tree, tag, and history interfaces
 include/moneta/storage/    Persistence and CSV interfaces
 src/                      Implementations matching those modules
-tests/unit/              Dependency-free test executables
+tests/unit/               Unit and SQLite integration test executables
 benchmarks/               Optional deterministic performance workload
 docs/                    Design and operation reference
 ```
 
-Headers describe interfaces other code can include; source files implement them. Tree metadata references account, ledger, and location stores by typed IDs. The application must validate those external records and coordinate financial changes with the ledger; these tree operations do not calculate account balances.
-
 ## Build and test
 
-Install CMake separately from the compiler. Use a C++20 compiler and CMake 3.20 or newer:
+Build with a C++20 compiler, CMake 3.20 or newer, and SQLite 3.33 or newer with development headers. On Debian or Ubuntu install `libsqlite3-dev`. For a nonstandard SQLite installation, pass `-DCMAKE_PREFIX_PATH=/path/to/prefix` when configuring.
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -81,8 +110,8 @@ for test in tests/unit/*_tests.cpp; do
     name="${test##*/}"
     name="${name%.cpp}"
     g++ -std=c++20 -O2 -Wall -Wextra -Wpedantic -Iinclude \
-        src/core/*.cpp src/expenses/*.cpp src/storage/*.cpp \
-        "$test" -o "build/$name" || exit 1
+        src/core/*.cpp src/accounting/*.cpp src/expenses/*.cpp src/storage/*.cpp \
+        "$test" -lsqlite3 -o "build/$name" || exit 1
     "./build/$name" || exit 1
 done
 ```
@@ -102,7 +131,3 @@ For an explicit larger run:
 ```
 
 The benchmark defaults to 100,000 purchases and accepts at most 1,000,000. It measures construction, cold/warm totals, combined filtering, selective and complete views, cache reuse, inherited category tags, and edits/moves followed by index rebuilding. It checks results against independent arithmetic. [An example cloud run](docs/benchmarks.md) records the workload, timings, and memory use. These workload-specific measurements do not establish a 500 ms guarantee, disk performance, or network latency.
-
-## Planned accounting modules
-
-The ledger will record cash movements and support account balances. Income, transfers, loan principal, investments, and exchange-rate conversions need their own accounting rules. Future work includes account/ledger integration, income and obligations, investment tracking, location summaries, recurring schedules, and application interfaces. A tag named `Recurring` is a label; it does not schedule payments.
